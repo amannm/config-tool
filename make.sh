@@ -14,7 +14,7 @@ BINARY_PATH="${BUILD_DIR}/${PROJECT_NAME}"
 function build {
   mkdir -p "${BUILD_DIR}"
   go build -trimpath -ldflags "-X ${PROJECT_MODULE}/internal/build.Version=${VERSION}" -o "${BINARY_PATH}" "${SOURCE_DIR}"
-  chmod +x "${bin_path}"
+  chmod +x "${BINARY_PATH}"
 }
 
 function dist {

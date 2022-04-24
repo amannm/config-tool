@@ -3,6 +3,7 @@ package convert
 import (
 	"encoding/json"
 	"fmt"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	k8spatch "k8s.io/apimachinery/pkg/util/strategicpatch"
 	"reflect"
 	"sigs.k8s.io/yaml"
@@ -12,8 +13,8 @@ type PatchGenerator struct {
 	schemaClient *SchemaClient
 }
 
-func NewPatchGenerator(schemaPath string) (*PatchGenerator, error) {
-	sc, err := NewSchemaClient(schemaPath)
+func NewPatchGenerator(schemaFolderPath string) (*PatchGenerator, error) {
+	sc, err := NewSchemaClient(schemaFolderPath)
 	if err != nil {
 		return nil, err
 	}
@@ -23,31 +24,88 @@ func NewPatchGenerator(schemaPath string) (*PatchGenerator, error) {
 	return c, nil
 }
 
-func (pg *PatchGenerator) ExtractBase(content map[string]interface{}, other map[string]interface{}) ([]byte, error) {
-	patchMeta := pg.schemaClient.GetPatchMetadata("io.k8s.api.apps.v1.Deployment")
-	patch, err := calculatePatch(content, other, patchMeta)
-	if err != nil {
-		return nil, err
-	}
-	base, err := subtractObject(other, patch, patchMeta)
-	if err != nil {
-		return nil, err
-	}
-	baseBytes, err := json.MarshalIndent(base, "", "    ")
-	if err != nil {
-		return nil, err
-	}
-
-	yamlPatch, err := yaml.JSONToYAML(baseBytes)
-	if err != nil {
-		return nil, err
-	}
-	return yamlPatch, nil
-	//patched, err := k8spatch.StrategicMergePatchUsingLookupPatchMeta(nil, nil, patchMeta)
-
+type PatchGenerationResult struct {
+	base    JSONObject
+	patches []JSONObject
 }
 
-func calculatePatch(content map[string]interface{}, other map[string]interface{}, lookupMeta k8spatch.LookupPatchMeta) (map[string]interface{}, error) {
+func (pgr *PatchGenerationResult) GetBaseYAML() ([]byte, error) {
+	baseBytes, err := json.MarshalIndent(pgr.base, "", "    ")
+	if err != nil {
+		return nil, err
+	}
+	return yaml.JSONToYAML(baseBytes)
+}
+
+func (pgr *PatchGenerationResult) GetPatchYAMLs() ([][]byte, error) {
+	result := [][]byte{}
+	for _, patch := range pgr.patches {
+		patchBytes, err := json.MarshalIndent(patch, "", "    ")
+		if err != nil {
+			return nil, err
+		}
+		yamlPatchBytes, err := yaml.JSONToYAML(patchBytes)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, yamlPatchBytes)
+	}
+	return result, nil
+}
+
+type JSONObject = map[string]interface{}
+
+func (pg *PatchGenerator) Execute(resources []JSONObject) ([]PatchGenerationResult, error) {
+
+	partitions := map[schema.GroupVersionKind][]JSONObject{}
+	for _, resource := range resources {
+		gvk, err := ComputeGVK(resource)
+		if err != nil {
+			return nil, err
+		}
+		partition, ok := partitions[*gvk]
+		if ok {
+			partitions[*gvk] = append(partition, resource)
+		} else {
+			partitions[*gvk] = []JSONObject{resource}
+		}
+	}
+	generationResults := []PatchGenerationResult{}
+	for gvk, partition := range partitions {
+		patchMeta, err := pg.schemaClient.GetPatchMetadata(gvk)
+		if err != nil {
+			return nil, err
+		}
+		base := partition[0]
+		for i := 1; i < len(partition); i++ {
+			other := partition[i]
+			patch, err := calculatePatch(other, base, patchMeta)
+			if err != nil {
+				return nil, err
+			}
+			base, err = subtractObject(base, patch, k8spatch.PatchMeta{}, patchMeta)
+			if err != nil {
+				return nil, err
+			}
+		}
+		result := PatchGenerationResult{
+			base:    base,
+			patches: []JSONObject{},
+		}
+		for i := 0; i < len(partition); i++ {
+			item := partition[i]
+			patch, err := calculatePatch(base, item, patchMeta)
+			if err != nil {
+				return nil, err
+			}
+			result.patches = append(result.patches, patch)
+		}
+		generationResults = append(generationResults, result)
+	}
+	return generationResults, nil
+}
+
+func calculatePatch(content JSONObject, other JSONObject, lookupMeta k8spatch.LookupPatchMeta) (JSONObject, error) {
 	contentBytes, err := json.Marshal(content)
 	if err != nil {
 		return nil, err
@@ -68,7 +126,7 @@ func calculatePatch(content map[string]interface{}, other map[string]interface{}
 	return patch, nil
 }
 
-func subtractObject(a map[string]interface{}, b map[string]interface{}, patchContext k8spatch.LookupPatchMeta) (map[string]interface{}, error) {
+func subtractObject(a JSONObject, b JSONObject, patchMeta k8spatch.PatchMeta, patchContext k8spatch.LookupPatchMeta) (JSONObject, error) {
 	result := map[string]interface{}{}
 	for k, aValue := range a {
 		bValue, ok := b[k]
@@ -77,11 +135,11 @@ func subtractObject(a map[string]interface{}, b map[string]interface{}, patchCon
 			case map[string]interface{}:
 				switch typedBValue := bValue.(type) {
 				case map[string]interface{}:
-					lookupMeta, _, err := patchContext.LookupPatchMetadataForStruct(k)
+					lookupMeta, patchMeta, err := patchContext.LookupPatchMetadataForStruct(k)
 					if err != nil {
 						return nil, err
 					}
-					result[k], err = subtractObject(typedAValue, typedBValue, lookupMeta)
+					result[k], err = subtractObject(typedAValue, typedBValue, patchMeta, lookupMeta)
 					if err != nil {
 						return nil, err
 					}
@@ -103,7 +161,7 @@ func subtractObject(a map[string]interface{}, b map[string]interface{}, patchCon
 					continue
 				}
 			default:
-				if reflect.DeepEqual(aValue, bValue) {
+				if reflect.DeepEqual(aValue, bValue) && k != patchMeta.GetPatchMergeKey() {
 					continue
 				}
 			}
@@ -113,13 +171,12 @@ func subtractObject(a map[string]interface{}, b map[string]interface{}, patchCon
 	return result, nil
 }
 
-func subtractList(a []interface{}, b []interface{}, patchMeta k8spatch.PatchMeta, patchContext k8spatch.LookupPatchMeta) ([]interface{}, error) {
+func subtractList(a []interface{}, b []interface{}, listPatchMetadata k8spatch.PatchMeta, listSchema k8spatch.LookupPatchMeta) ([]interface{}, error) {
 	result := []interface{}{}
 	for _, aValue := range a {
 		switch typedAValue := aValue.(type) {
 		case map[string]interface{}:
-			mergeKey := patchMeta.GetPatchMergeKey()
-			subtractedItem, err := subtractObjectListItem(typedAValue, b, mergeKey, patchContext)
+			subtractedItem, err := subtractObjectListItem(typedAValue, b, listPatchMetadata, listSchema)
 			if err != nil {
 				return nil, err
 			}
@@ -135,7 +192,8 @@ func subtractList(a []interface{}, b []interface{}, patchMeta k8spatch.PatchMeta
 	}
 	return result, nil
 }
-func subtractObjectListItem(aValue map[string]interface{}, b []interface{}, mergeKey string, patchContext k8spatch.LookupPatchMeta) (map[string]interface{}, error) {
+func subtractObjectListItem(aValue JSONObject, b []interface{}, patchMeta k8spatch.PatchMeta, patchContext k8spatch.LookupPatchMeta) (JSONObject, error) {
+	mergeKey := patchMeta.GetPatchMergeKey()
 	aMergeValue, ok := aValue[mergeKey]
 	if !ok {
 		return nil, fmt.Errorf("unexpected missing merge key")
@@ -148,7 +206,7 @@ func subtractObjectListItem(aValue map[string]interface{}, b []interface{}, merg
 				return nil, fmt.Errorf("unexpected missing merge key")
 			}
 			if aMergeValue == bMergeValue {
-				subtractedObject, err := subtractObject(aValue, typedBValue, patchContext)
+				subtractedObject, err := subtractObject(aValue, typedBValue, patchMeta, patchContext)
 				if err != nil {
 					return nil, err
 				}

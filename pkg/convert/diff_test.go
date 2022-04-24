@@ -1,6 +1,7 @@
 package convert
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -186,28 +187,43 @@ spec:
       nodeSelector:
         kubernetes.io/os: linux`
 
-const schemaPath = "/Users/amannmalik/IdeaProjects/kubernetes/api/openapi-spec/v3/apis__apps__v1_openapi.json"
-
 func Test_Diff(t *testing.T) {
 	objects, err := ParseYAMLFileIntoJSONObjects([]byte(input))
 	if err != nil {
 		t.Fatal(err)
 	}
-	//results := [][]byte{}
-	//for _, o := range objects {
-	//	jsonBytes, _ := json.Marshal(o)
-	//	results = append(results, jsonBytes)
-	//}
+	pg, err := NewPatchGenerator("/Users/amannmalik/IdeaProjects/kubernetes/api/openapi-spec/v3")
+	if err != nil {
+		t.Fatal(err)
+	}
+	results, err := pg.Execute(objects)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) < 1 {
+		t.Fatal(err)
+	}
+	result := results[0]
 
-	pg, err := NewPatchGenerator(schemaPath)
+	baseYAML, err := result.GetBaseYAML()
 	if err != nil {
 		t.Fatal(err)
 	}
-	base, err := pg.ExtractBase(objects[0], objects[1])
+	if len(baseYAML) < 3 {
+		t.Fatal(err)
+	}
+	patches, err := result.GetPatchYAMLs()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(base) < 3 {
+	if len(patches) != 3 {
 		t.Fatal(err)
 	}
+
+	t.Log(string(baseYAML))
+	consolidated := []string{}
+	for _, patch := range patches {
+		consolidated = append(consolidated, string(patch))
+	}
+	t.Log(strings.Join(consolidated, "---\n"))
 }
