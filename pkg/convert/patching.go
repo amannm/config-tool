@@ -9,8 +9,17 @@ import (
 	"sigs.k8s.io/yaml"
 )
 
+type JSONObject = map[string]interface{}
+type JSONArray = []interface{}
+type JSONValue = interface{}
+
 type PatchGenerator struct {
 	schemaClient *SchemaClient
+}
+
+type PatchGenerationResult struct {
+	base    JSONObject
+	patches []JSONObject
 }
 
 func NewPatchGenerator(schemaFolderPath string) (*PatchGenerator, error) {
@@ -22,11 +31,6 @@ func NewPatchGenerator(schemaFolderPath string) (*PatchGenerator, error) {
 		sc,
 	}
 	return c, nil
-}
-
-type PatchGenerationResult struct {
-	base    JSONObject
-	patches []JSONObject
 }
 
 func (pgr *PatchGenerationResult) GetBaseYAML() ([]byte, error) {
@@ -52,8 +56,6 @@ func (pgr *PatchGenerationResult) GetPatchYAMLs() ([][]byte, error) {
 	}
 	return result, nil
 }
-
-type JSONObject = map[string]interface{}
 
 func (pg *PatchGenerator) Execute(resources []JSONObject) ([]PatchGenerationResult, error) {
 
@@ -118,7 +120,7 @@ func calculatePatch(content JSONObject, other JSONObject, lookupMeta k8spatch.Lo
 	if err != nil {
 		return nil, err
 	}
-	var patch map[string]interface{}
+	var patch JSONObject
 	err = json.Unmarshal(patchBytes, &patch)
 	if err != nil {
 		return nil, err
@@ -127,14 +129,14 @@ func calculatePatch(content JSONObject, other JSONObject, lookupMeta k8spatch.Lo
 }
 
 func subtractObject(a JSONObject, b JSONObject, patchMeta k8spatch.PatchMeta, patchContext k8spatch.LookupPatchMeta) (JSONObject, error) {
-	result := map[string]interface{}{}
+	result := JSONObject{}
 	for k, aValue := range a {
 		bValue, ok := b[k]
 		if ok {
 			switch typedAValue := aValue.(type) {
-			case map[string]interface{}:
+			case JSONObject:
 				switch typedBValue := bValue.(type) {
-				case map[string]interface{}:
+				case JSONObject:
 					lookupMeta, patchMeta, err := patchContext.LookupPatchMetadataForStruct(k)
 					if err != nil {
 						return nil, err
@@ -145,9 +147,9 @@ func subtractObject(a JSONObject, b JSONObject, patchMeta k8spatch.PatchMeta, pa
 					}
 					continue
 				}
-			case []interface{}:
+			case JSONArray:
 				switch typedBValue := bValue.(type) {
-				case []interface{}:
+				case JSONArray:
 					lookupMeta, patchMeta, err := patchContext.LookupPatchMetadataForSlice(k)
 					if err != nil {
 						return nil, err
@@ -171,11 +173,11 @@ func subtractObject(a JSONObject, b JSONObject, patchMeta k8spatch.PatchMeta, pa
 	return result, nil
 }
 
-func subtractList(a []interface{}, b []interface{}, listPatchMetadata k8spatch.PatchMeta, listSchema k8spatch.LookupPatchMeta) ([]interface{}, error) {
-	result := []interface{}{}
+func subtractList(a JSONArray, b JSONArray, listPatchMetadata k8spatch.PatchMeta, listSchema k8spatch.LookupPatchMeta) (JSONArray, error) {
+	result := JSONArray{}
 	for _, aValue := range a {
 		switch typedAValue := aValue.(type) {
-		case map[string]interface{}:
+		case JSONObject:
 			subtractedItem, err := subtractObjectListItem(typedAValue, b, listPatchMetadata, listSchema)
 			if err != nil {
 				return nil, err
@@ -192,7 +194,7 @@ func subtractList(a []interface{}, b []interface{}, listPatchMetadata k8spatch.P
 	}
 	return result, nil
 }
-func subtractObjectListItem(aValue JSONObject, b []interface{}, patchMeta k8spatch.PatchMeta, patchContext k8spatch.LookupPatchMeta) (JSONObject, error) {
+func subtractObjectListItem(aValue JSONObject, b JSONArray, patchMeta k8spatch.PatchMeta, patchContext k8spatch.LookupPatchMeta) (JSONObject, error) {
 	mergeKey := patchMeta.GetPatchMergeKey()
 	aMergeValue, ok := aValue[mergeKey]
 	if !ok {
@@ -200,7 +202,7 @@ func subtractObjectListItem(aValue JSONObject, b []interface{}, patchMeta k8spat
 	}
 	for _, bValue := range b {
 		switch typedBValue := bValue.(type) {
-		case map[string]interface{}:
+		case JSONObject:
 			bMergeValue, ok := typedBValue[mergeKey]
 			if !ok {
 				return nil, fmt.Errorf("unexpected missing merge key")
@@ -220,7 +222,7 @@ func subtractObjectListItem(aValue JSONObject, b []interface{}, patchMeta k8spat
 	}
 	return aValue, nil
 }
-func subtractNonObjectListItem(aValue interface{}, b []interface{}) interface{} {
+func subtractNonObjectListItem(aValue JSONValue, b JSONArray) JSONValue {
 	for _, bValue := range b {
 		if reflect.DeepEqual(aValue, bValue) {
 			return nil

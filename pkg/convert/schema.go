@@ -79,7 +79,6 @@ func (sc *SchemaClient) GetSchemaByGVK(manifest JSONObject) (*proto.Schema, erro
 	if !ok {
 		return nil, fmt.Errorf(fmt.Sprintf("resource schema not found for GVK: %s", gvk.String()))
 	}
-	//patchMeta := k8spatch.NewPatchMetaFromOpenAPI(*modelSchema)
 	return modelSchema, nil
 }
 
@@ -92,7 +91,7 @@ func parseGVKs(s proto.Schema) []schema.GroupVersionKind {
 	if !ok {
 		return []schema.GroupVersionKind{}
 	}
-	gvkList, ok := gvkExtension.([]interface{})
+	gvkList, ok := gvkExtension.(JSONArray)
 	if !ok {
 		return []schema.GroupVersionKind{}
 	}
