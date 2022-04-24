@@ -9,9 +9,9 @@ import (
 	"sigs.k8s.io/yaml"
 )
 
-type JSONObject = map[string]interface{}
-type JSONArray = []interface{}
-type JSONValue = interface{}
+type JSONObject = map[string]any
+type JSONArray = []any
+type JSONValue = any
 
 type PatchGenerator struct {
 	schemaClient *SchemaClient

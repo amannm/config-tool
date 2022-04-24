@@ -6,10 +6,10 @@ import (
 	"strings"
 )
 
-func ReadAllFiles(folderPath string, fileSuffix string, handler func([]byte) error) error {
+func ReadAllFiles[T any](folderPath string, fileSuffix string, handler func([]byte) (*T, error)) (*T, error) {
 	entries, err := os.ReadDir(folderPath)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	for _, entry := range entries {
 		name := entry.Name()
@@ -17,13 +17,10 @@ func ReadAllFiles(folderPath string, fileSuffix string, handler func([]byte) err
 			filePath := path.Join(folderPath, name)
 			data, err := os.ReadFile(filePath)
 			if err != nil {
-				return err
+				return nil, err
 			}
-			err = handler(data)
-			if err != nil {
-				return err
-			}
+			return handler(data)
 		}
 	}
-	return nil
+	return nil, nil
 }

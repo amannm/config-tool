@@ -42,10 +42,6 @@ func NewSchemaClient(schemaFolderPath string) (*SchemaClient, error) {
 			modelNames := models.ListModels()
 			for _, modelName := range modelNames {
 				modelSchema := models.LookupModel(modelName)
-				_, ok := schemas[modelName]
-				if !ok {
-					schemas[modelName] = &modelSchema
-				}
 				modelGvks := parseGVKs(modelSchema)
 				for _, modelGvk := range modelGvks {
 					_, ok := gvks[modelGvk]

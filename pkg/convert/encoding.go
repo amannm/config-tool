@@ -15,7 +15,7 @@ func ParseYAMLFileIntoJSONObjects(y []byte) ([]JSONObject, error) {
 	reader := bytes.NewReader(y)
 	decoder := yaml.NewDecoder(reader)
 	for {
-		var yamlObj interface{}
+		var yamlObj any
 		err := decoder.Decode(&yamlObj)
 		if errors.Is(err, io.EOF) {
 			break
@@ -34,7 +34,7 @@ func ParseYAMLFileIntoJSONObjects(y []byte) ([]JSONObject, error) {
 		if err != nil {
 			return nil, err
 		}
-		var jsonObj interface{}
+		var jsonObj any
 		err = json.Unmarshal(jsonBytes, &jsonObj)
 		if err != nil {
 			return nil, err
