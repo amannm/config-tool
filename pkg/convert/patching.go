@@ -5,6 +5,9 @@ import (
 	"fmt"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	k8spatch "k8s.io/apimachinery/pkg/util/strategicpatch"
+	"log"
+	"os"
+	"path"
 	"reflect"
 	"sigs.k8s.io/yaml"
 )
@@ -17,9 +20,35 @@ type PatchGenerator struct {
 	schemaClient *SchemaClient
 }
 
-type PatchGenerationResult struct {
-	base    JSONObject
-	patches []JSONObject
+func (pgr *PatchPartition) String() string {
+	jsonContent, _ := json.Marshal(pgr.base)
+	yamlContent, _ := yaml.JSONToYAML(jsonContent)
+	return fmt.Sprintf("gvk = %s\n\n%s", pgr.gvk, yamlContent)
+}
+
+func (pgr *PatchPartition) DumpToFolder(directoryPath string) error {
+	rootDir := path.Join(directoryPath, fmt.Sprintf("%s_%s_%s", pgr.gvk.Group, pgr.gvk.Version, pgr.gvk.Kind))
+	jsonContent, _ := json.Marshal(pgr.base)
+	yamlContent, _ := yaml.JSONToYAML(jsonContent)
+	err := os.Mkdir(rootDir, 0755)
+	if err != nil {
+		return err
+	}
+	err = WriteFile(yamlContent, path.Join(rootDir, "base.yaml"))
+	if err != nil {
+		return err
+	}
+	for _, source := range pgr.sources {
+		if len(source.patch) > 0 {
+			jsonContent, _ := json.Marshal(source.patch)
+			yamlContent, _ := yaml.JSONToYAML(jsonContent)
+			err = WriteFile(yamlContent, path.Join(rootDir, fmt.Sprintf("%s.yaml", source.name)))
+			if err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 func NewPatchGenerator(schemaFolderPath string) (*PatchGenerator, error) {
@@ -33,7 +62,7 @@ func NewPatchGenerator(schemaFolderPath string) (*PatchGenerator, error) {
 	return c, nil
 }
 
-func (pgr *PatchGenerationResult) GetBaseYAML() ([]byte, error) {
+func (pgr *PatchPartition) GetBaseYAML() ([]byte, error) {
 	baseBytes, err := json.MarshalIndent(pgr.base, "", "    ")
 	if err != nil {
 		return nil, err
@@ -41,70 +70,136 @@ func (pgr *PatchGenerationResult) GetBaseYAML() ([]byte, error) {
 	return yaml.JSONToYAML(baseBytes)
 }
 
-func (pgr *PatchGenerationResult) GetPatchYAMLs() ([][]byte, error) {
+func (pgr *PatchPartition) GetPatchYAMLs() ([][]byte, error) {
 	result := [][]byte{}
-	for _, patch := range pgr.patches {
-		patchBytes, err := json.MarshalIndent(patch, "", "    ")
-		if err != nil {
-			return nil, err
+	for _, source := range pgr.sources {
+		if len(source.patch) > 0 {
+			jsonBytes, err := json.MarshalIndent(source.patch, "", "    ")
+			if err != nil {
+				return nil, err
+			}
+			yamlBytes, err := yaml.JSONToYAML(jsonBytes)
+			if err != nil {
+				return nil, err
+			}
+			result = append(result, yamlBytes)
 		}
-		yamlPatchBytes, err := yaml.JSONToYAML(patchBytes)
-		if err != nil {
-			return nil, err
-		}
-		result = append(result, yamlPatchBytes)
 	}
 	return result, nil
 }
 
-func (pg *PatchGenerator) Execute(resources []JSONObject) ([]PatchGenerationResult, error) {
+func (pgr *PatchPartition) GetOriginalYAMLs() ([][]byte, error) {
+	result := [][]byte{}
+	for _, source := range pgr.sources {
+		jsonBytes, err := json.MarshalIndent(source.original, "", "    ")
+		if err != nil {
+			return nil, err
+		}
+		yamlBytes, err := yaml.JSONToYAML(jsonBytes)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, yamlBytes)
+	}
+	return result, nil
+}
 
-	partitions := map[schema.GroupVersionKind][]JSONObject{}
+type PatchSource struct {
+	name     string
+	original JSONObject
+	patch    JSONObject
+}
+type PatchPartition struct {
+	gvk     schema.GroupVersionKind
+	base    JSONObject
+	sources []PatchSource
+}
+
+func (pg *PatchGenerator) Execute(resources []JSONObject) ([]PatchPartition, error) {
+	partitions := map[schema.GroupVersionKind]PatchPartition{}
 	for _, resource := range resources {
 		gvk, err := ComputeGVK(resource)
 		if err != nil {
 			return nil, err
 		}
+		name, err := GetResourceName(resource)
+		if err != nil {
+			return nil, err
+		}
 		partition, ok := partitions[*gvk]
 		if ok {
-			partitions[*gvk] = append(partition, resource)
+			next := append(partition.sources, PatchSource{
+				name:     name,
+				original: resource,
+				patch:    JSONObject{},
+			})
+			partition.sources = next
+			partitions[*gvk] = partition
 		} else {
-			partitions[*gvk] = []JSONObject{resource}
+			partitions[*gvk] = PatchPartition{
+				gvk:  *gvk,
+				base: JSONObject{},
+				sources: []PatchSource{{
+					name:     name,
+					original: resource,
+					patch:    JSONObject{},
+				}},
+			}
 		}
 	}
-	generationResults := []PatchGenerationResult{}
+	outputPartitions := map[schema.GroupVersionKind]PatchPartition{}
 	for gvk, partition := range partitions {
 		patchMeta, err := pg.schemaClient.GetPatchMetadata(gvk)
 		if err != nil {
 			return nil, err
 		}
-		base := partition[0]
-		for i := 1; i < len(partition); i++ {
-			other := partition[i]
-			patch, err := calculatePatch(other, base, patchMeta)
+		partition.base = cloneJSON(partition.sources[0].original)
+		for i := 1; i < len(partition.sources); i++ {
+			other := partition.sources[i]
+			patch, err := calculatePatch(other.original, partition.base, patchMeta)
 			if err != nil {
 				return nil, err
 			}
-			base, err = subtractObject(base, patch, k8spatch.PatchMeta{}, patchMeta)
+			nextBase, err := subtractObject(partition.base, patch, k8spatch.PatchMeta{}, patchMeta)
 			if err != nil {
 				return nil, err
 			}
+			partition.base = nextBase
 		}
-		result := PatchGenerationResult{
-			base:    base,
-			patches: []JSONObject{},
-		}
-		for i := 0; i < len(partition); i++ {
-			item := partition[i]
-			patch, err := calculatePatch(base, item, patchMeta)
+		for i := 0; i < len(partition.sources); i++ {
+			item := partition.sources[i]
+			patch, err := calculatePatch(partition.base, item.original, patchMeta)
 			if err != nil {
 				return nil, err
 			}
-			result.patches = append(result.patches, patch)
+			orderedPatch, err := ExecutePatchOrdering(patch)
+			if err != nil {
+				return nil, err
+			}
+			item.patch = orderedPatch
+			partition.sources[i] = item
 		}
-		generationResults = append(generationResults, result)
+		outputPartitions[gvk] = partition
 	}
-	return generationResults, nil
+
+	results := make([]PatchPartition, 0, len(outputPartitions))
+	for _, value := range outputPartitions {
+		results = append(results, value)
+	}
+	return results, nil
+}
+
+func GetResourceName(resource JSONObject) (string, error) {
+	if metadata, ok := resource["metadata"]; ok {
+		if typedMetadata, ok := metadata.(JSONObject); ok {
+			if name, ok := typedMetadata["name"]; ok {
+				if typedName, ok := name.(string); ok {
+					return typedName, nil
+				}
+			}
+		}
+	}
+	return "", fmt.Errorf("required attribute 'name' not found in resource metadata")
 }
 
 func calculatePatch(content JSONObject, other JSONObject, lookupMeta k8spatch.LookupPatchMeta) (JSONObject, error) {
@@ -131,12 +226,10 @@ func calculatePatch(content JSONObject, other JSONObject, lookupMeta k8spatch.Lo
 func subtractObject(a JSONObject, b JSONObject, patchMeta k8spatch.PatchMeta, patchContext k8spatch.LookupPatchMeta) (JSONObject, error) {
 	result := JSONObject{}
 	for k, aValue := range a {
-		bValue, ok := b[k]
-		if ok {
+		if bValue, ok := b[k]; ok {
 			switch typedAValue := aValue.(type) {
 			case JSONObject:
-				switch typedBValue := bValue.(type) {
-				case JSONObject:
+				if typedBValue, ok := bValue.(JSONObject); ok {
 					lookupMeta, patchMeta, err := patchContext.LookupPatchMetadataForStruct(k)
 					if err != nil {
 						return nil, err
@@ -146,21 +239,24 @@ func subtractObject(a JSONObject, b JSONObject, patchMeta k8spatch.PatchMeta, pa
 						return nil, err
 					}
 					continue
+				} else {
+					log.Default().Printf("unexpected type mismatch while evaluating key '%s'\n", k)
 				}
 			case JSONArray:
-				switch typedBValue := bValue.(type) {
-				case JSONArray:
+				if typedBValue, ok := bValue.(JSONArray); ok {
 					lookupMeta, patchMeta, err := patchContext.LookupPatchMetadataForSlice(k)
 					if err != nil {
 						return nil, err
 					}
 					if shouldSubtractList(patchMeta) {
 						result[k], err = subtractList(typedAValue, typedBValue, patchMeta, lookupMeta)
+						if err != nil {
+							return nil, err
+						}
+						continue
 					}
-					if err != nil {
-						return nil, err
-					}
-					continue
+				} else {
+					log.Default().Printf("unexpected type mismatch while evaluating key '%s'\n", k)
 				}
 			default:
 				if reflect.DeepEqual(aValue, bValue) && k != patchMeta.GetPatchMergeKey() {

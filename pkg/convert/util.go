@@ -6,11 +6,12 @@ import (
 	"strings"
 )
 
-func ReadAllFiles[T any](folderPath string, fileSuffix string, handler func([]byte) (*T, error)) (*T, error) {
+func ReadAllFiles(folderPath string, fileSuffix string) ([][]byte, error) {
 	entries, err := os.ReadDir(folderPath)
 	if err != nil {
 		return nil, err
 	}
+	fileContents := [][]byte{}
 	for _, entry := range entries {
 		name := entry.Name()
 		if strings.HasSuffix(name, fileSuffix) {
@@ -19,8 +20,21 @@ func ReadAllFiles[T any](folderPath string, fileSuffix string, handler func([]by
 			if err != nil {
 				return nil, err
 			}
-			return handler(data)
+			fileContents = append(fileContents, data)
 		}
 	}
-	return nil, nil
+	return fileContents, nil
+}
+
+func WriteFile(content []byte, path string) error {
+	f, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = f.Close() }()
+	_, err = f.Write(content)
+	if err != nil {
+		return err
+	}
+	return nil
 }

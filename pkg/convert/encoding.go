@@ -15,7 +15,7 @@ func ParseYAMLFileIntoJSONObjects(y []byte) ([]JSONObject, error) {
 	reader := bytes.NewReader(y)
 	decoder := yaml.NewDecoder(reader)
 	for {
-		var yamlObj any
+		var yamlObj map[string]interface{}
 		err := decoder.Decode(&yamlObj)
 		if errors.Is(err, io.EOF) {
 			break
@@ -50,4 +50,11 @@ func ParseYAMLFileIntoJSONObjects(y []byte) ([]JSONObject, error) {
 		}
 	}
 	return result, nil
+}
+
+func cloneJSON(o JSONObject) JSONObject {
+	var cloned JSONObject
+	sourceBytes, _ := json.Marshal(o)
+	_ = json.Unmarshal(sourceBytes, &cloned)
+	return cloned
 }
